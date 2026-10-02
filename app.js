@@ -1,9 +1,6 @@
 (function () {
   const PROJECT_CONTEXT = window.__EEG_SERVER_BOOTSTRAP__?.config?.projectContext;
   const STORAGE_KEY = "eeg-image-annotator-state-v1" + (PROJECT_CONTEXT ? ":" + PROJECT_CONTEXT : "");
-  const DB_NAME = "eeg-image-annotator-db";
-  const DB_VERSION = 1;
-  const IMAGE_STORE = "images";
   const OVERLAP_THRESHOLD = 0.5;
 
   const DEFAULT_LAYOUT = {
@@ -102,14 +99,13 @@
     imageFilter: "all",
     layoutPreset: cloneLayout(DEFAULT_LAYOUT),
     defaultWindowDuration: 30,
-    unmatchedReferences: [],
+    events: [],
     images: [],
     imageUrls: new Map(),
     api: {
       available: false,
       config: null
     },
-    db: null,
     drag: null,
     calibrationTarget: null,
     resizeObserver: null
@@ -128,30 +124,11 @@
   init();
 
   async function init() {
-    state.db = await openDatabase().catch((error) => {
-      console.warn("IndexedDB unavailable; image blobs will not persist.", error);
-      els.saveStatus.textContent = "浏览器图片持久化不可用；建议通过本地服务器打开。";
-      return null;
-    });
     loadState();
     bindEvents();
     renderChannelConfig();
-    if (window.location.protocol !== "file:") {
-      await loadServerDataset({ silent: true });
-      if (!state.api.available) {
-        await hydrateImageUrls();
-        if (!state.currentImageId && state.images.length) {
-          state.currentImageId = state.images[0].id;
-        }
-        render();
-      }
-    } else {
-      await hydrateImageUrls();
-      if (!state.currentImageId && state.images.length) {
-        state.currentImageId = state.images[0].id;
-      }
-      render();
-    }
+    await loadServerDataset({ silent: true });
+    if (!state.api.available) render();
     initialized = true;
   }
 
@@ -479,7 +456,6 @@
         }
       }
       state.images = loadedImages;
-      importLegacyReferences(state.unmatchedReferences);
 
       if (!state.images.some((image) => image.id === state.currentImageId)) {
         state.currentImageId = state.images[0] ? state.images[0].id : null;
@@ -628,11 +604,77 @@
       .find((annotation) => annotation.id === state.selectedAnnotationId) || null;
   }
 
+  function getEventForAnnotation(annotation) {
+    return annotation ? state.events.find((event) => event.id === annotation.eventId) || null : null;
+  }
+
+  function eventIdentity(event) {
+    return JSON.stringify([
+      normalizeEventType(event.eventType),
+      event.datasetName || "",
+      event.recordingName || "",
+      round(Number(event.startTime), 6),
+      round(Number(event.endTime), 6),
+      [...event.channels].map(EventGeometry.channel).sort()
+    ]);
+  }
+
+  function migrateLegacyEvents(images) {
+    const groups = new Map();
+    for (const image of Array.isArray(images) ? images : []) {
+      for (const annotation of Array.isArray(image.annotations) ? image.annotations : []) {
+        const eventId = annotation.eventId || annotation.id;
+        if (!eventId) continue;
+        const range = getTimeRange(image, annotation);
+        const key = JSON.stringify([eventId, normalizeEventType(annotation.eventType),
+          annotation.datasetName || image.datasetName || state.datasetName,
+          annotation.recordingName || image.recordingName || image.name]);
+        if (!groups.has(key)) groups.set(key, {
+          id: eventId,
+          eventType: normalizeEventType(annotation.eventType),
+          datasetName: annotation.datasetName || image.datasetName || state.datasetName,
+          recordingName: annotation.recordingName || image.recordingName || image.name,
+          startTime: range.start,
+          endTime: range.end,
+          channels: [],
+          source: annotation.source || "manual",
+          createdAt: annotation.createdAt || new Date().toISOString()
+        });
+        const event = groups.get(key);
+        event.startTime = Math.min(event.startTime, range.start);
+        event.endTime = Math.max(event.endTime, range.end);
+        if (annotation.channel && !event.channels.includes(EventGeometry.channel(annotation.channel))) {
+          event.channels.push(EventGeometry.channel(annotation.channel));
+        }
+      }
+    }
+    return [...groups.values()].filter(event => event.endTime > event.startTime && event.channels.length);
+  }
+
   function getAnnotationsForActiveEvent(image) {
-    if (!image || !Array.isArray(image.annotations)) return [];
-    return image.annotations.filter((annotation) =>
-      normalizeEventType(annotation.eventType) === state.activeEventType
-    );
+    if (!image) return [];
+    const windowStart = Number(image.windowStart || 0);
+    const windowEnd = windowStart + Number(image.windowDuration || state.defaultWindowDuration);
+    return state.events.flatMap((event) => {
+      if (normalizeEventType(event.eventType) !== state.activeEventType ||
+          event.recordingName !== image.recordingName || event.datasetName !== image.datasetName ||
+          !(event.endTime > windowStart && event.startTime < windowEnd)) return [];
+      const left = Math.max(event.startTime, windowStart);
+      const right = Math.min(event.endTime, windowEnd);
+      return event.channels.map((channel) => ({
+        id: JSON.stringify([event.id, image.id, channel]),
+        eventId: event.id,
+        eventType: event.eventType,
+        channel,
+        source: event.source,
+        datasetName: event.datasetName,
+        recordingName: event.recordingName,
+        startFraction: (left - windowStart) / image.windowDuration,
+        endFraction: (right - windowStart) / image.windowDuration,
+        originalStart: event.startTime,
+        originalEnd: event.endTime
+      }));
+    });
   }
 
   function render() {
@@ -1136,8 +1178,8 @@
     }
 
     const plot = getPlotBounds(image);
-    const annotation = {
-      id: makeId("ann"),
+    const draft = {
+      id: makeId("event"),
       eventType: state.activeEventType,
       x1: clamp(box.x1, plot.left, plot.right),
       y1: clamp(box.y1, 0, els.eegImage.naturalHeight),
@@ -1145,16 +1187,31 @@
       y2: clamp(box.y2, 0, els.eegImage.naturalHeight),
       createdAt: new Date().toISOString()
     };
-    const rows = computeRowsForAnnotation(image, annotation);
-    const span = plot.right - plot.left;
-    const created = rows.map(row => ({
-      id: JSON.stringify([annotation.id, row.channel]), eventId: annotation.id,
-      eventType: annotation.eventType, channel: row.channel, source: "manual",
-      startFraction: (annotation.x1 - plot.left) / span,
-      endFraction: (annotation.x2 - plot.left) / span
-    }));
-    image.annotations.push(...created);
-    state.selectedAnnotationId = created[0]?.id || null;
+    const rows = computeRowsForAnnotation(image, draft);
+    const time = getTimeRange(image, draft);
+    if (!image.recordingName || !image.datasetName) {
+      window.alert("当前底图缺少 recordingName 或 datasetName，请重新生成或加载 manifest。");
+      renderAnnotationsOnly();
+      return;
+    }
+    if (!rows.length) {
+      window.alert("标注框未覆盖任何通道高度的 50% 以上。");
+      renderAnnotationsOnly();
+      return;
+    }
+    const eventRecord = {
+      id: draft.id,
+      eventType: draft.eventType,
+      datasetName: image.datasetName,
+      recordingName: image.recordingName,
+      startTime: time.start,
+      endTime: time.end,
+      channels: rows.map(row => row.channel),
+      source: "manual",
+      createdAt: new Date().toISOString()
+    };
+    state.events.push(eventRecord);
+    state.selectedAnnotationId = JSON.stringify([eventRecord.id, image.id, eventRecord.channels[0]]);
     persistSoon("标注已保存。");
     renderImageList();
     renderAnnotationsOnly();
@@ -1173,7 +1230,8 @@
       handle,
       annotationId: annotation.id,
       startPoint: point,
-      originalBox: annotationBox(getCurrentImage(), annotation)
+      originalBox: annotationBox(getCurrentImage(), annotation),
+      originalEvent: { ...getEventForAnnotation(annotation), channels: [...getEventForAnnotation(annotation).channels] }
     };
     els.overlay.setPointerCapture(event.pointerId);
     renderAnnotationsOnly();
@@ -1232,12 +1290,33 @@
     if (Number.isFinite(annotation.startFraction)) {
       const image = getCurrentImage();
       const plot = getPlotBounds(image);
-      annotation.startFraction = clamp((box.x1 - plot.left) / (plot.right - plot.left), 0, 1);
-      annotation.endFraction = clamp((box.x2 - plot.left) / (plot.right - plot.left), 0, 1);
+      const event = getEventForAnnotation(annotation);
+      if (!event) return;
+      const span = plot.right - plot.left;
+      const visibleStart = image.windowStart + clamp((box.x1 - plot.left) / span, 0, 1) * image.windowDuration;
+      const visibleEnd = image.windowStart + clamp((box.x2 - plot.left) / span, 0, 1) * image.windowDuration;
+      const original = state.drag?.originalEvent || event;
+      if (state.drag?.mode === "move") {
+        const originalVisibleStart = Math.max(original.startTime, image.windowStart);
+        const delta = visibleStart - originalVisibleStart;
+        event.startTime = original.startTime + delta;
+        event.endTime = original.endTime + delta;
+      } else {
+        if (original.startTime >= image.windowStart) event.startTime = visibleStart;
+        if (original.endTime <= image.windowStart + image.windowDuration) event.endTime = visibleEnd;
+      }
       const best = getChannelRegions(image).map(c => ({
         c, overlap: Math.max(0, Math.min(c.bottom, box.y2) - Math.max(c.top, box.y1))
       })).sort((a, b) => b.overlap - a.overlap)[0];
-      if (best?.overlap > 0) annotation.channel = EventGeometry.channel(best.c.name);
+      if (best?.overlap > 0) {
+        const nextChannel = EventGeometry.channel(best.c.name);
+        const index = event.channels.indexOf(annotation.channel);
+        if (index >= 0 && nextChannel !== annotation.channel) {
+          if (event.channels.includes(nextChannel)) event.channels.splice(index, 1);
+          else event.channels[index] = nextChannel;
+        }
+      }
+      event.updatedAt = new Date().toISOString();
       return;
     }
     annotation.x1 = box.x1;
@@ -1283,7 +1362,12 @@
   function deleteSelectedAnnotation() {
     const image = getCurrentImage();
     if (!image || !state.selectedAnnotationId) return;
-    image.annotations = image.annotations.filter((annotation) => annotation.id !== state.selectedAnnotationId);
+    const annotation = getSelectedAnnotation();
+    const event = getEventForAnnotation(annotation);
+    if (event && annotation) {
+      event.channels = event.channels.filter((channel) => channel !== annotation.channel);
+      if (!event.channels.length) state.events = state.events.filter((item) => item.id !== event.id);
+    }
     state.selectedAnnotationId = null;
     persistSoon("已删除标注。");
     renderImageList();
@@ -1443,7 +1527,7 @@
         start_epoch: start.epoch, start_offset: start.offset,
         end_epoch: end.epoch, end_offset: end.offset, channel: annotation.channel,
         dataset_name: image.datasetName || annotation.datasetName || state.datasetName,
-        image_name: image.name, duration_s: time.end - time.start,
+        image_name: annotation.recordingName || image.recordingName, duration_s: time.end - time.start,
         annotation_id: annotation.eventId || annotation.id
       }];
     }
@@ -1466,7 +1550,7 @@
           end_epoch: endPosition.epoch,
           end_offset: endPosition.offset,
           channel: toCsvChannelName(channel.name),
-          image_name: image.name,
+          image_name: image.recordingName,
           event_type: annotation.eventType,
           event_label: EVENT_LABELS[annotation.eventType] || annotation.eventType,
           start_time: timeRange.start,
@@ -1493,7 +1577,7 @@
     const { csv, rowCount } = buildCsv();
     if (state.api.available) {
       try {
-        updateTaskProgress(65, "正在写入默认 CSV 文件...", `${rowCount} 行标注`);
+        updateTaskProgress(65, "正在写入项目 CSV 文件...", `${rowCount} 行标注`);
         const result = await postJson("api/save-csv", { csv, context: PROJECT_CONTEXT });
         persistNow(`已写入 ${rowCount} 行到 ${result.csvPath || "CSV 文件"}。`);
         return {
@@ -1545,9 +1629,25 @@
   }
 
   function buildCsv() {
-    const rows = state.images.flatMap((image) =>
-      image.annotations.flatMap((annotation) => computeRowsForAnnotation(image, annotation))
-    );
+    const rows = state.events.flatMap((event) => {
+      const image = state.images.find(item => item.recordingName === event.recordingName &&
+        item.datasetName === event.datasetName);
+      if (!image) throw new Error(`事件 ${event.id} 找不到对应 recording：${event.recordingName}`);
+      const start = getEpochPositionForTime(image, event.startTime);
+      const end = getEpochPositionForTime(image, event.endTime);
+      return event.channels.map(channel => ({
+        type: CSV_EVENT_TYPES[event.eventType] || event.eventType,
+        start_epoch: start.epoch,
+        start_offset: start.offset,
+        end_epoch: end.epoch,
+        end_offset: end.offset,
+        channel,
+        dataset_name: event.datasetName,
+        image_name: event.recordingName,
+        duration_s: event.endTime - event.startTime,
+        annotation_id: event.id
+      }));
+    });
     const columns = [
       "type",
       "start_epoch",
@@ -1624,66 +1724,47 @@
         if (unmatchedExamples.length < 3) unmatchedExamples.push(event.recordingName || "(空 image_name)");
         continue;
       }
-      let visible = 0;
-      for (const image of images) {
-        const length = image.epochLengthSec || image.windowDuration;
-        const base = image.epochBase ?? (getEpochIndexNumber(image) - image.windowStart / length);
-        const parts = EventGeometry.fragments(event, image, length, base);
-        visible += parts.length;
-        for (const part of parts) pending.push({ image, part });
-      }
+      const geometry = images[0];
+      const length = geometry.epochLengthSec || geometry.windowDuration;
+      const base = geometry.epochBase ?? (getEpochIndexNumber(geometry) - geometry.windowStart / length);
+      const startTime = (event.startEpoch - base) * length + event.startOffset;
+      const endTime = (event.endEpoch - base) * length + event.endOffset;
+      const visible = images.some(image => endTime > image.windowStart && startTime < image.windowStart + image.windowDuration);
+      if (visible) pending.push({ ...event, startTime, endTime });
       if (!visible) outside++;
     }
     if (unmatched) {
       const loadedExamples = state.images.slice(0, 3).map(image => image.name).join(", ") || "当前没有已加载图片";
-      throw new Error(`${unmatched} 个事件没有匹配的图片窗口。CSV image_name 示例：${unmatchedExamples.join(", ")}。当前底图示例：${loadedExamples}。请先在“文件 -> 生成无标注底图”生成并加载对应版本，或在“项目”里加载已有图片版本；同时确认 CSV 的 image_name 与底图 manifest 中的图片名一致。`);
+      throw new Error(`${unmatched} 个事件没有匹配的 recording。CSV image_name 示例：${unmatchedExamples.join(", ")}。当前底图示例：${loadedExamples}。请先生成并加载对应底图版本，同时确认 CSV 的 image_name 与 manifest 中的 recordingName 一致。`);
     }
     let added = 0;
     const missing = new Set();
-    for (const { image, part } of pending) {
-      if (!image.annotations.some(a => a.id === part.id)) { image.annotations.push(part); added++; }
-      if (!image.layout.channels.some(c => EventGeometry.channel(c.name) === part.channel)) missing.add(part.channel);
+    for (const event of pending) {
+      const key = eventIdentity(event);
+      if (!state.events.some(item => eventIdentity(item) === key)) {
+        state.events.push({
+          id: event.eventId,
+          eventType: event.eventType,
+          datasetName: event.datasetName,
+          recordingName: event.recordingName,
+          startTime: event.startTime,
+          endTime: event.endTime,
+          channels: [...event.channels],
+          source: "reference",
+          createdAt: new Date().toISOString()
+        });
+        added++;
+      }
+      const layout = state.images.find(image => image.recordingName === event.recordingName)?.layout;
+      for (const channel of event.channels) {
+        if (!layout?.channels.some(c => EventGeometry.channel(c.name) === channel)) missing.add(channel);
+      }
     }
-    persistNow(`已导入 ${added} 个通道片段。`);
+    persistNow(`已导入 ${added} 个逻辑事件。`);
     render();
-    return { message: `已导入 ${added} 个通道片段。${outside ? `另有 ${outside} 个事件位于已加载窗口之外。` : ""}`,
+    return { message: `已导入 ${added} 个逻辑事件。${outside ? `另有 ${outside} 个事件位于已加载窗口之外。` : ""}`,
       detail: missing.size ? `待配置通道：${[...missing].join(", ")}；设置并校准后自动显示。`
-        : "参考框使用相对时间；请在布局校准中确认校准并显示标注框。每个通道、窗口片段可独立编辑。" };
-  }
-
-  function getEpochCsvGeometry(row, headerIndex, imageName) {
-    const image = findImageByCsvName(imageName);
-    if (!image) {
-      throw new Error(`找不到 CSV 中对应的图片：${imageName}。请先载入图片，再导入该 CSV。`);
-    }
-    const startTime = getAbsoluteTimeFromEpochPosition(
-      image,
-      csvValue(row, headerIndex, "start_epoch"),
-      csvValue(row, headerIndex, "start_offset")
-    );
-    const endTime = getAbsoluteTimeFromEpochPosition(
-      image,
-      csvValue(row, headerIndex, "end_epoch"),
-      csvValue(row, headerIndex, "end_offset")
-    );
-    if (startTime == null || endTime == null) return null;
-
-    const plot = getPlotBounds(image);
-    const duration = Math.max(Number(image.epochLengthSec || image.windowDuration || state.defaultWindowDuration || 30), 1);
-    const plotWidth = Math.max(plot.right - plot.left, 1);
-    const x1 = plot.left + ((startTime - Number(image.windowStart || 0)) / duration) * plotWidth;
-    const x2 = plot.left + ((endTime - Number(image.windowStart || 0)) / duration) * plotWidth;
-    const channelName = csvValue(row, headerIndex, "channel");
-    const channel = findChannelRegionForCsvChannel(image, channelName);
-    if (!channel) {
-      throw new Error(`当前图片布局中找不到通道：${channelName}。请先校准或添加对应通道。`);
-    }
-    return {
-      x1: clamp(x1, 0, getImageWidth(image)),
-      y1: channel.top,
-      x2: clamp(x2, 0, getImageWidth(image)),
-      y2: channel.bottom
-    };
+        : "事件使用 recording-level 时间；图片中的框由事件按窗口自动投影。" };
   }
 
   function findImageByCsvName(imageName) {
@@ -1693,26 +1774,21 @@
     );
   }
 
-  function findChannelRegionForCsvChannel(image, channelName) {
-    const key = normalizeChannelKey(toCsvChannelName(channelName));
-    return getChannelRegions(image).find((channel) => normalizeChannelKey(toCsvChannelName(channel.name)) === key);
-  }
-
   function getPersistableState() {
     return {
-      version: 1,
+      version: 2,
       datasetName: state.datasetName,
       currentImageId: state.currentImageId,
       activeEventType: state.activeEventType,
       layoutPreset: cloneLayout(state.layoutPreset),
       defaultWindowDuration: state.defaultWindowDuration,
-      ...(state.unmatchedReferences.length ? { referenceAnnotations: state.unmatchedReferences } : {}),
+      events: state.events.map((event) => ({ ...event, channels: [...event.channels] })),
       images: state.images.map((image) => ({
           ...image,
           naturalWidth: image.naturalWidth || null,
           naturalHeight: image.naturalHeight || null,
           layout: cloneLayout(image.layout),
-          annotations: image.annotations.map((annotation) => ({ ...annotation }))
+          annotations: []
       }))
     };
   }
@@ -1761,6 +1837,9 @@
         (Array.isArray(payload.images) && payload.images.find((image) => image && image.windowDuration) || {}).windowDuration ||
         state.defaultWindowDuration
       );
+      state.events = Array.isArray(payload.events)
+        ? payload.events.map(event => ({ ...event, channels: [...event.channels] }))
+        : migrateLegacyEvents(payload.images || []);
       state.images = Array.isArray(payload.images)
         ? payload.images.map((image) => ({
             ...image,
@@ -1777,54 +1856,10 @@
             annotations: Array.isArray(image.annotations) ? image.annotations : []
           }))
         : [];
-      importLegacyReferences(payload.referenceAnnotations);
-      els.saveStatus.textContent = "已载入浏览器中的本地数据集。";
+      els.saveStatus.textContent = "已载入浏览器中的项目状态备份。";
     } catch (error) {
       console.warn("Cannot parse saved state", error);
     }
-  }
-
-  async function hydrateImageUrls(onProgress) {
-    for (const [id, url] of state.imageUrls.entries()) {
-      if (String(url).startsWith("blob:")) URL.revokeObjectURL(url);
-      state.imageUrls.delete(id);
-    }
-    for (let index = 0; index < state.images.length; index += 1) {
-      const image = state.images[index];
-      if (image.source === "server" && image.serverId) {
-        state.imageUrls.set(image.id, `api/image/${encodeURIComponent(image.serverId)}`);
-      } else {
-        const blob = await getImageBlob(image.id);
-        if (blob) {
-          state.imageUrls.set(image.id, URL.createObjectURL(blob));
-        }
-      }
-      if (onProgress) onProgress(index + 1, state.images.length, image.relativePath || image.name);
-    }
-  }
-
-  function openDatabase() {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, DB_VERSION);
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains(IMAGE_STORE)) {
-          db.createObjectStore(IMAGE_STORE);
-        }
-      };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-  }
-
-  function getImageBlob(id) {
-    if (!state.db) return Promise.resolve(null);
-    return new Promise((resolve, reject) => {
-      const tx = state.db.transaction(IMAGE_STORE, "readonly");
-      const request = tx.objectStore(IMAGE_STORE).get(id);
-      request.onsuccess = () => resolve(request.result || null);
-      request.onerror = () => reject(request.error);
-    });
   }
 
   function svgEl(name, attributes) {
@@ -1862,43 +1897,6 @@
     state.images.forEach((item) => {
       item.layout = cloneLayout(state.layoutPreset);
     });
-  }
-
-  function importLegacyReferences(references) {
-    let added = 0;
-    const unmatched = [];
-    for (const reference of Array.isArray(references) ? references : []) {
-      const image = findImageByCsvName(reference && reference.imageName);
-      if (!image) {
-        unmatched.push(reference);
-        continue;
-      }
-      if (addReferenceAsAnnotation(image, reference)) added += 1;
-    }
-    state.unmatchedReferences = unmatched;
-    return added;
-  }
-
-  function addReferenceAsAnnotation(image, reference) {
-    if (!image || !reference) return false;
-    const coordinates = [reference.x1, reference.y1, reference.x2, reference.y2].map(parseOptionalNumber);
-    if (coordinates.some((value) => value == null)) return false;
-    const id = reference.annotationId || reference.id || makeId("ann");
-    if (image.annotations.some((annotation) => annotation.id === id)) return false;
-    const box = normalizeBox({
-      x1: coordinates[0],
-      y1: coordinates[1],
-      x2: coordinates[2],
-      y2: coordinates[3]
-    });
-    image.annotations.push({
-      id,
-      eventType: normalizeEventType(reference.eventType),
-      ...box,
-      source: "reference",
-      createdAt: new Date().toISOString()
-    });
-    return true;
   }
 
   function normalizeRelativePath(path) {

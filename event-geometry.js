@@ -51,24 +51,6 @@
     }
     return [...groups.values()];
   }
-  function fragments(event, image, epochLength, epochBase) {
-    if (!(epochLength > 0) || !Number.isInteger(epochBase)) throw new Error("非法 epoch 配置。");
-    if (event.startOffset > epochLength || event.endOffset > epochLength) throw new Error("offset 超出 epoch 长度。");
-    const start = (event.startEpoch - epochBase) * epochLength + event.startOffset;
-    const end = (event.endEpoch - epochBase) * epochLength + event.endOffset;
-    if (!(end > start)) throw new Error("事件结束时间必须大于开始时间。");
-    const left = Math.max(start, image.windowStart);
-    const right = Math.min(end, image.windowStart + image.windowDuration);
-    if (!(right > left)) return [];
-    return event.channels.map(c => ({
-      id: JSON.stringify([event.eventId, image.id, c]), eventId: event.eventId,
-      eventType: event.eventType, channel: c, source: "reference",
-      datasetName: event.datasetName, recordingName: event.recordingName,
-      startFraction: (left - image.windowStart) / image.windowDuration,
-      endFraction: (right - image.windowStart) / image.windowDuration,
-      originalStart: start, originalEnd: end
-    }));
-  }
   function project(annotation, image, width, height) {
     const region = image.layout.channels.find(c => channel(c.name) === annotation.channel);
     if (!region || !(region.bottomPct > region.topPct) || !(image.layout.plotRightPct > image.layout.plotLeftPct)) return null;
@@ -77,6 +59,6 @@
     return { x1: left + annotation.startFraction * span, x2: left + annotation.endFraction * span,
       y1: region.topPct / 100 * height, y2: region.bottomPct / 100 * height };
   }
-  root.EventGeometry = { channels, channel, type, readRows, fragments, project };
+  root.EventGeometry = { channels, channel, type, readRows, project };
   if (typeof module !== "undefined") module.exports = root.EventGeometry;
 })(globalThis);
