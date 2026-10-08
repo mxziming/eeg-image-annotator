@@ -16,26 +16,14 @@
             <div class="menu-content">
               <button id="projectCreateBtn" type="button" class="menu-item primary">创建项目</button>
               <button id="projectOpenBtn" type="button" class="menu-item">打开项目</button>
+              <button id="loadWaveImagesBtn" type="button" class="menu-item">更换底图</button>
             </div>
           </details>
           <details class="menu">
-            <summary>文件</summary>
-            <div class="menu-content">
-              <button id="generateWaveImagesBtn" type="button" class="menu-item primary">生成无标注底图</button>
-              <button id="loadWaveImagesBtn" type="button" class="menu-item">加载无标注底图</button>
-            </div>
-          </details>
-          <details class="menu">
-            <summary>加载</summary>
+            <summary>数据</summary>
             <div class="menu-content">
               <button id="csvImportBtn" type="button" class="menu-item">加载CSV标注</button>
               <input id="csvInput" type="file" accept="text/csv,.csv" hidden>
-            </div>
-          </details>
-          <details class="menu">
-            <summary>保存</summary>
-            <div class="menu-content menu-content-right">
-              <button id="saveDatasetBtn" type="button" class="menu-item">保存当前进度</button>
               <button id="exportCsvBtn" type="button" class="menu-item primary">导出CSV标注</button>
             </div>
           </details>
@@ -112,17 +100,9 @@
                   <option value="k_complex">K波</option>
                   <option value="spindle">纺锤波</option>
                   <option value="micro_arousal">微觉醒</option>
-                </select>
-              </label>
-              <label class="field compact">
-                <span>窗口起点 (s)</span>
-                <input id="windowStartInput" type="number" step="0.01" value="0">
-              </label>
-              <label class="field compact">
-                <span>窗口长度 (s)</span>
-                <select id="windowDurationSelect">
-                  <option value="20">20</option>
-                  <option value="30">30</option>
+                  <option value="rem">快速眼动</option>
+                  <option value="sem">慢速眼动</option>
+                  <option value="mbm">主要身体运动</option>
                 </select>
               </label>
             </section>
@@ -130,11 +110,11 @@
             <section class="inspector-section dataset-panel">
               <label class="field compact">
                 <span>数据集名称</span>
-                <input id="datasetNameInput" type="text" value="eeg-image-annotations">
+                <input id="datasetNameInput" type="text" value="" readonly placeholder="由底图 manifest 提供">
               </label>
               <label class="field compact">
-                <span>EDF 目录</span>
-                <input id="projectEdfDirInput" type="text" value="" readonly placeholder="尚未打开项目">
+                <span>外部底图库</span>
+                <input id="projectImageSetsDirInput" type="text" value="" readonly placeholder="尚未打开项目">
               </label>
               <label class="field compact">
                 <span>项目目录</span>
@@ -164,9 +144,8 @@
               </div>
               <p id="calibrationStatus" class="status-line">可手动输入百分比，也可点击对应按钮后在图上点选。</p>
               <div id="channelConfig" class="channel-config"></div>
-              <button id="configureChannelsBtn" type="button" class="button secondary wide">设置通道名称和顺序</button>
               <button id="applyCalibrationBtn" type="button" class="button primary wide">确认校准并显示标注框</button>
-              <button id="resetCalibrationBtn" type="button" class="button secondary wide">恢复示例布局</button>
+              <button id="resetCalibrationBtn" type="button" class="button secondary wide">恢复 Manifest 布局</button>
             </details>
           </section>
 
@@ -210,15 +189,12 @@
     </div>
 
     <dialog id="projectWorkflowDialog" class="workflow-dialog">
-      <header><h2>标注项目与波形底图</h2><button id="closeWorkflowBtn" type="button">关闭</button></header>
+      <header><h2>标注项目与外部底图</h2><button id="closeWorkflowBtn" type="button" class="icon-button" aria-label="关闭" title="关闭">×</button></header>
       <section id="wfCreateSection" class="workflow-card">
-        <label>EDF文件目录<div class="workflow-path"><input id="wfEdf" placeholder="E:/Dataset/SouthData/记录目录"><button type="button" data-browse="wfEdf">选择文件夹</button></div></label>
+        <label>外部图片集目录<div class="workflow-path"><input id="wfImageSets" placeholder="E:/EEGAnnotationData/dataset/recording/image_sets"><button type="button" data-browse="wfImageSets">选择文件夹</button></div></label>
         <label>项目保存目录<div class="workflow-path"><input id="wfProject" placeholder="E:/AnnotationProjects/recording_39"><button type="button" data-browse="wfProject">选择文件夹</button></div></label>
-        <details><summary>高级保存目录（留空使用项目内默认子目录）</summary>
-          <label>图片目录<input id="wfImages" placeholder="images"></label>
+        <details><summary>高级保存目录（留空使用项目内默认目录）</summary>
           <label>标注目录<input id="wfAnnotations" placeholder="annotations"></label>
-          <label>缓存目录<input id="wfCache" placeholder="cache"></label>
-          <label>日志目录<input id="wfLogs" placeholder="logs"></label>
         </details>
         <div class="workflow-actions"><button id="wfCreate" type="button" class="button primary">创建项目</button></div>
       </section>
@@ -226,38 +202,12 @@
         <label>项目保存目录<div class="workflow-path"><input id="wfOpenProject" placeholder="E:/AnnotationProjects/recording_39"><button type="button" data-browse="wfOpenProject">选择文件夹</button></div></label>
         <div class="workflow-actions"><button id="wfOpen" type="button" class="button primary">打开项目</button></div>
       </section>
-      <section id="wfGenerateSection" class="workflow-card">
-        <p class="workflow-section-note">从当前项目的 EDF 目录生成一套干净底图。detection CSV 需要和这里的 dataset、recording、epoch 设置保持一致。</p>
-        <label>通道（按绘制顺序，空格分隔）<input id="wfChannels" value="F3M2 F4M1 C3M2 C4M1 O1M2 O2M1"></label>
-        <div class="workflow-grid">
-          <label>数据集名<input id="wfDataset" value="SouthData"></label>
-          <label>记录标识（对应 detection 的 image_name）<input id="wfRecording"></label>
-          <label>每窗秒数<input id="wfEpoch" type="number" value="30" min="0.1" step="any"></label>
-          <label>epoch 编号起点<input id="wfBase" type="number" value="1" step="1"></label>
-          <label>开始 epoch（空=首窗）<input id="wfStart" type="number" step="1"></label>
-          <label>结束 epoch（空=末窗）<input id="wfEnd" type="number" step="1"></label>
-          <label>显示低频 Hz（空=不滤波）<input id="wfBandLow" type="number" min="0" step="any" placeholder="0.3"></label>
-          <label>显示高频 Hz（空=不滤波）<input id="wfBandHigh" type="number" min="0" step="any" placeholder="35"></label>
-          <label>默认每通道纵向显示范围 ±μV<input id="wfAmplitude" type="number" value="100" min="1" step="any"></label>
-          <label>DPI<input id="wfDpi" type="number" value="150" min="1" max="600"></label>
-        </div>
-        <div class="workflow-actions"><button id="wfGenerate" type="button" class="button primary">生成新版本并加载</button><button id="wfCancel" type="button" class="button secondary" disabled>取消生成</button></div>
-        <progress id="wfProgress" max="100" value="0"></progress>
-      </section>
       <section id="wfVersionSection" class="workflow-version-section">
-        <label>已有图片版本<select id="wfVersions"></select></label>
-        <button id="wfActivate" type="button" class="button secondary">加载无标注底图</button>
-        <p class="status-line">这里加载的是项目中已生成的底图版本；detection 输出 CSV 请用“加载”菜单导入。</p>
+        <label>外部图片集<select id="wfVersions"></select></label>
+        <button id="wfActivate" type="button" class="button secondary">加载所选底图</button>
+        <p class="status-line">图片及 images_manifest.json 由 Detection 外部工具生成；这里仅发现、加载和校准底图。</p>
       </section>
       <p id="wfStatus" role="status" aria-live="polite"></p>
-    </dialog>
-    <dialog id="directoryDialog" class="workflow-dialog">
-      <header><h2>选择文件夹</h2><button id="directoryClose" type="button">取消</button></header>
-      <section class="directory-picker">
-        <label>当前位置<input id="directoryPath" readonly></label>
-        <div class="workflow-actions"><button id="directoryUp" type="button">上一级</button><button id="directoryChoose" type="button" class="button primary">选择文件夹</button></div>
-        <div id="directoryList" class="directory-list"></div>
-      </section>
     </dialog>
     <script src="event-geometry.js"></script>
     <script src="app.js"></script>

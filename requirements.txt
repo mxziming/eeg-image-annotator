@@ -1,4 +1,1 @@
-numpy
-scipy
-matplotlib
-mne>=1.6,<2
+# The annotation server uses only the Python standard library.

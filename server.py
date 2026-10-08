@@ -10,7 +10,7 @@ import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit, parse_qs
+from urllib.parse import unquote, urlsplit
 from project_workflow import ProjectWorkflow, read_json, atomic_text
 
 
@@ -34,10 +34,12 @@ def current_config():
     manifest_path = directory / "images_manifest.json"
     manifest = read_json(manifest_path) if manifest_path.is_file() else None
     csv_path = (WORKFLOW.annotation_path("exports/annotations.csv")
-                if WORKFLOW.generation_dir() else "先生成图片" if WORKFLOW.config else CSV_PATH)
-    return {"datasetName": (manifest["images"][0]["datasetName"] if manifest and manifest["images"] else DATASET_NAME),
+                if WORKFLOW.generation_dir() else "先加载外部底图" if WORKFLOW.config else CSV_PATH)
+    return {"datasetName": (manifest.get("datasetName") if manifest else None) or
+            (manifest["images"][0].get("datasetName", DATASET_NAME) if manifest and manifest.get("images") else DATASET_NAME),
             "imageDir": str(directory), "csvPath": str(csv_path), "overlapThreshold": 0.5,
-            "projectContext": WORKFLOW.context(), "generation": WORKFLOW.config.get("active_generation") if WORKFLOW.config else None,
+            "projectContext": WORKFLOW.context(),
+            "imageSet": WORKFLOW.config.get("active_image_set") if WORKFLOW.config else None,
             "manifest": manifest}
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
@@ -129,20 +131,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.serve_static(APP_DIR / "workflow.js")
         if request_path == "/api/project":
             return self.send_json(WORKFLOW.info())
-        if request_path == "/api/job":
-            return self.send_json(WORKFLOW.job_status())
-        if request_path == "/api/directories":
-            try:
-                query = parse_qs(urlsplit(self.path).query)
-                value = query.get("path", [""])[0]
-                if not value:
-                    roots = [f"{letter}:/" for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if Path(f"{letter}:/").is_dir()] if os.name == "nt" else ["/"]
-                    return self.send_json({"path": "", "parent": "", "directories": roots})
-                path = Path(value).expanduser().resolve()
-                return self.send_json({"path": str(path), "parent": str(path.parent),
-                    "directories": sorted(str(p) for p in path.iterdir() if p.is_dir())})
-            except Exception as error:
-                return self.send_json({"error": str(error)}, 400)
         if request_path == "/" or request_path == "/index.html":
             return self.serve_index()
         if request_path == "/styles.css":
@@ -212,13 +200,9 @@ class Handler(BaseHTTPRequestHandler):
                               else WORKFLOW.open(payload["path"]))
                 return self.send_json(result)
             if self.path == "/api/project/activate":
-                return self.send_json(WORKFLOW.activate(payload["generation"], payload.get("context")))
+                return self.send_json(WORKFLOW.activate(payload["imageSet"], payload.get("context")))
             if self.path == "/api/project/save":
                 return self.send_json(WORKFLOW.save_state(payload))
-            if self.path == "/api/job/start":
-                return self.send_json(WORKFLOW.start(payload))
-            if self.path == "/api/job/cancel":
-                return self.send_json(WORKFLOW.cancel(payload.get("context")))
             if self.path == "/api/select-directory":
                 return self.send_json({"path": choose_directory(payload.get("initial", ""), payload.get("title", "选择文件夹"))})
             if self.path != "/api/save-csv":

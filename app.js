@@ -16,18 +16,21 @@
 
   const EVENT_LABELS = {
     k_complex: "K波",
-    spindle: "纺锤波", micro_arousal: "微觉醒"
+    spindle: "纺锤波", micro_arousal: "微觉醒",
+    rem: "快速眼动", sem: "慢速眼动", mbm: "主要身体运动"
   };
   const CSV_EVENT_TYPES = {
     k_complex: "k-complex",
-    spindle: "spindle", micro_arousal: "micro-arousal"
+    spindle: "spindle", micro_arousal: "A", rem: "REM", sem: "SEM", mbm: "MBM"
   };
   const INTERNAL_EVENT_TYPES = {
     k: "k_complex", s: "spindle", a: "micro_arousal",
     arousal: "micro_arousal", "micro-arousal": "micro_arousal", micro_arousal: "micro_arousal",
     "k-complex": "k_complex",
     k_complex: "k_complex",
-    spindle: "spindle"
+    spindle: "spindle", rem: "rem", sem: "sem", mbm: "mbm",
+    "rapid-eye-movement": "rem", "slow-eye-movement": "sem",
+    "major-body-movement": "mbm"
   };
   const CSV_CHANNEL_ALIASES = new Map([
     ["F3CLE", "F3M2"],
@@ -56,7 +59,6 @@
     taskDialogProgress: document.getElementById("taskDialogProgress"),
     taskDialogDetail: document.getElementById("taskDialogDetail"),
     taskDialogConfirmBtn: document.getElementById("taskDialogConfirmBtn"),
-    saveDatasetBtn: document.getElementById("saveDatasetBtn"),
     exportCsvBtn: document.getElementById("exportCsvBtn"),
     serverStatus: document.getElementById("serverStatus"),
     saveStatus: document.getElementById("saveStatus"),
@@ -68,8 +70,6 @@
     currentImagePosition: document.getElementById("currentImagePosition"),
     currentImageName: document.getElementById("currentImageName"),
     eventTypeSelect: document.getElementById("eventTypeSelect"),
-    windowStartInput: document.getElementById("windowStartInput"),
-    windowDurationSelect: document.getElementById("windowDurationSelect"),
     deleteAnnotationBtn: document.getElementById("deleteAnnotationBtn"),
     prevImageBtn: document.getElementById("prevImageBtn"),
     nextImageBtn: document.getElementById("nextImageBtn"),
@@ -98,6 +98,7 @@
     imageSearch: "",
     imageFilter: "all",
     layoutPreset: cloneLayout(DEFAULT_LAYOUT),
+    manifestLayout: null,
     defaultWindowDuration: 30,
     events: [],
     images: [],
@@ -133,11 +134,6 @@
   }
 
   function bindEvents() {
-    els.datasetNameInput.addEventListener("input", () => {
-      state.datasetName = els.datasetNameInput.value.trim() || "eeg-image-annotations";
-      persistSoon("数据集名称已更新。");
-    });
-
     document.getElementById("applyCalibrationBtn").addEventListener("click", () => {
       const image = getCurrentImage();
       if (!image) return;
@@ -150,28 +146,6 @@
       rememberLayoutPreset(image);
       persistSoon("校准已确认，后续调整边界会实时更新标注框。");
       renderAnnotationsOnly();
-    });
-
-    document.getElementById("configureChannelsBtn").addEventListener("click", () => {
-      const image = getCurrentImage();
-      const layout = image ? image.layout : state.layoutPreset;
-      const answer = window.prompt("按图片从上到下输入通道名，用逗号分隔：",
-        layout.channels.map(c => toCsvChannelName(c.name)).join(","));
-      if (answer === null) return;
-      const names = answer.split(/[,，;]/).map(v => EventGeometry.channel(v.trim())).filter(Boolean);
-      if (!names.length || new Set(names).size !== names.length) {
-        window.alert("请输入至少一条通道，名称不能重复。"); return;
-      }
-      layout.channels = names.map((name, i) => {
-        const existing = layout.channels.find(c => EventGeometry.channel(c.name) === name);
-        return existing || { name, topPct: 5 + i * 90 / names.length,
-          bottomPct: 5 + (i + 1) * 90 / names.length - 2 };
-      });
-      layout.calibrated = false;
-      if (image) rememberLayoutPreset(image);
-      else state.layoutPreset = cloneLayout(layout);
-      persistSoon("通道已设置，请点选每条通道的上下边界。");
-      render();
     });
 
     els.csvImportBtn.addEventListener("click", () => {
@@ -203,15 +177,6 @@
       event.target.value = "";
     });
 
-    els.saveDatasetBtn.addEventListener("click", async () => {
-      closeTopbarMenus();
-      await runTask("保存当前进度", "正在整理数据集状态...", async () => {
-        updateTaskProgress(45, PROJECT_CONTEXT ? "正在写入项目标注文件..." : "正在写入浏览器本地存储...");
-        await waitForNextPaint();
-        await window.eegWorkflow.flush();
-        return { message: "当前进度已保存。" };
-      });
-    });
     els.exportCsvBtn.addEventListener("click", async () => {
       closeTopbarMenus();
       await runTask("导出 CSV", "正在生成标注表...", exportCsv);
@@ -233,23 +198,6 @@
       state.drag = null;
       persistNow(`已切换到${EVENT_LABELS[state.activeEventType]}标注。`);
       renderImageList();
-      renderAnnotationsOnly();
-    });
-
-    els.windowStartInput.addEventListener("input", () => {
-      const image = getCurrentImage();
-      if (!image) return;
-      image.windowStart = parseFloatOrZero(els.windowStartInput.value);
-      persistSoon("窗口起点已更新。");
-      renderAnnotationsOnly();
-    });
-
-    els.windowDurationSelect.addEventListener("change", () => {
-      state.defaultWindowDuration = Number(els.windowDurationSelect.value);
-      state.images.forEach((image) => {
-        image.windowDuration = state.defaultWindowDuration;
-      });
-      persistSoon("窗口长度已更新，并会作为之后图片的默认值。");
       renderAnnotationsOnly();
     });
 
@@ -397,12 +345,26 @@
       const payload = await requestJson("api/images");
       const serverImages = Array.isArray(payload.images) ? payload.images : [];
       const manifest = config.manifest;
-      const metadata = new Map((manifest?.images || []).map(item => [item.name, item]));
-      if (manifest && !state.images.length) {
-        state.layoutPreset = { plotLeftPct: 6.5, plotRightPct: 99, calibrated: false,
-          channels: manifest.channels.map((name, index) => ({ name,
-            topPct: 5 + index * 90 / manifest.channels.length,
-            bottomPct: 5 + (index + 1) * 90 / manifest.channels.length })) };
+      const metadata = new Map();
+      for (const item of manifest?.images || []) {
+        metadata.set(normalizeRelativePath(item.name), item);
+        metadata.set(normalizeImageLookupName(item.name), item);
+      }
+      if (manifest) {
+        const configured = manifest.channels || [];
+        state.manifestLayout = {
+          plotLeftPct: Number(manifest.canvas?.plotLeftPct ?? 6.5),
+          plotRightPct: Number(manifest.canvas?.plotRightPct ?? 99),
+          calibrated: configured.every(item => typeof item === "object" &&
+            Number.isFinite(item.topPct) && Number.isFinite(item.bottomPct)),
+          channels: configured.map((item, index) => typeof item === "string" ? { name: item,
+            topPct: 5 + index * 90 / configured.length,
+            bottomPct: 5 + (index + 1) * 90 / configured.length } : {
+              name: item.name, kind: item.kind,
+              topPct: Number(item.topPct), bottomPct: Number(item.bottomPct)
+            })
+        };
+        if (!state.images.length) state.layoutPreset = cloneLayout(state.manifestLayout);
         state.defaultWindowDuration = manifest.epochLengthSec;
         renderChannelConfig();
       }
@@ -421,7 +383,8 @@
       for (let index = 0; index < serverImages.length; index += 1) {
         const item = serverImages[index];
         const existing = existingById.get(item.id) || existingByName.get(item.name);
-        const meta = metadata.get(item.name);
+        const meta = metadata.get(normalizeRelativePath(item.relativePath || item.name)) ||
+          metadata.get(normalizeImageLookupName(item.name));
         const record = {
           recordingName: existing?.recordingName,
           datasetName: existing?.datasetName,
@@ -443,7 +406,8 @@
           layout: cloneLayout(state.layoutPreset),
           annotations: existing && Array.isArray(existing.annotations) ? existing.annotations : []
         };
-        if (meta) Object.assign(record, { recordingName: meta.recordingName, datasetName: meta.datasetName,
+        if (meta) Object.assign(record, { recordingName: meta.recordingName || manifest.recordingName,
+          datasetName: meta.datasetName || manifest.datasetName,
           epoch: meta.epoch, epochBase: manifest.epochBase, epochLengthSec: manifest.epochLengthSec,
           windowStart: meta.windowStart, windowDuration: meta.windowDuration });
         state.imageUrls.set(record.id, `api/image/${encodeURIComponent(record.serverId)}`);
@@ -680,7 +644,6 @@
   function render() {
     els.datasetNameInput.value = state.datasetName;
     els.eventTypeSelect.value = state.activeEventType;
-    els.windowDurationSelect.value = String(state.defaultWindowDuration);
     renderImageList();
     renderStageHeading();
     renderCurrentImage();
@@ -793,17 +756,6 @@
     const url = state.imageUrls.get(image.id);
     els.emptyState.hidden = true;
     els.viewer.hidden = false;
-    els.windowStartInput.value = image.windowStart;
-    const durationValue = String(image.windowDuration || state.defaultWindowDuration);
-    if (![...els.windowDurationSelect.options].some(option => option.value === durationValue)) {
-      const option = document.createElement("option");
-      option.value = durationValue; option.textContent = durationValue;
-      els.windowDurationSelect.append(option);
-    }
-    els.windowDurationSelect.value = durationValue;
-    // Manifest time geometry belongs to the generated image, not calibration.
-    els.windowDurationSelect.disabled = Boolean(image.epochLengthSec);
-    els.windowStartInput.disabled = Boolean(image.epochLengthSec);
     els.eegImage.onload = () => {
       image.naturalWidth = els.eegImage.naturalWidth;
       image.naturalHeight = els.eegImage.naturalHeight;
@@ -1190,7 +1142,7 @@
     const rows = computeRowsForAnnotation(image, draft);
     const time = getTimeRange(image, draft);
     if (!image.recordingName || !image.datasetName) {
-      window.alert("当前底图缺少 recordingName 或 datasetName，请重新生成或加载 manifest。");
+      window.alert("当前底图缺少 recordingName 或 datasetName，请重新导出或加载 manifest。");
       renderAnnotationsOnly();
       return;
     }
@@ -1206,7 +1158,7 @@
       recordingName: image.recordingName,
       startTime: time.start,
       endTime: time.end,
-      channels: rows.map(row => row.channel),
+      channels: [...new Set(rows.map(row => row.channel))],
       source: "manual",
       createdAt: new Date().toISOString()
     };
@@ -1305,10 +1257,11 @@
         if (original.startTime >= image.windowStart) event.startTime = visibleStart;
         if (original.endTime <= image.windowStart + image.windowDuration) event.endTime = visibleEnd;
       }
+      const definition = EventGeometry.eventDefinitions[event.eventType];
       const best = getChannelRegions(image).map(c => ({
         c, overlap: Math.max(0, Math.min(c.bottom, box.y2) - Math.max(c.top, box.y1))
       })).sort((a, b) => b.overlap - a.overlap)[0];
-      if (best?.overlap > 0) {
+      if (definition?.channelMode === "overlap" && best?.overlap > 0) {
         const nextChannel = EventGeometry.channel(best.c.name);
         const index = event.channels.indexOf(annotation.channel);
         if (index >= 0 && nextChannel !== annotation.channel) {
@@ -1395,12 +1348,12 @@
   }
 
   function resetCalibration() {
-    state.layoutPreset = cloneLayout(DEFAULT_LAYOUT);
+    state.layoutPreset = cloneLayout(state.manifestLayout || DEFAULT_LAYOUT);
     state.images.forEach((image) => {
       image.layout = cloneLayout(state.layoutPreset);
     });
     state.calibrationTarget = null;
-    persistSoon("已恢复示例布局。");
+    persistSoon(state.manifestLayout ? "已恢复 Manifest 布局。" : "已恢复默认布局。");
     render();
   }
 
@@ -1533,6 +1486,19 @@
     }
     const box = normalizeBox(annotation);
     const timeRange = getTimeRange(image, box);
+    const definition = EventGeometry.eventDefinitions[annotation.eventType];
+    const fixedChannel = definition?.channelMode === "global" ? "GLOBAL"
+      : definition?.channelMode === "joint-eog" ? "LOC;ROC" : null;
+    if (fixedChannel) return [{
+      type: definition.csvType,
+      channel: fixedChannel,
+      dataset_name: image.datasetName,
+      image_name: image.recordingName,
+      start_time: timeRange.start,
+      end_time: timeRange.end,
+      duration_s: timeRange.end - timeRange.start,
+      annotation_id: annotation.id
+    }];
     const channels = getChannelRegions(image);
     const startPosition = getEpochPositionForTime(image, timeRange.start);
     const endPosition = getEpochPositionForTime(image, timeRange.end);
@@ -1687,14 +1653,26 @@
     const bindings = payload.images.map(meta => ({ meta, image: findImageByCsvName(meta.name) }));
     if (bindings.some(b => !b.image)) throw new Error("请先加载 manifest 中的全部波形图片。");
     for (const { meta } of bindings) {
-      if (!meta.recordingName || !meta.datasetName || !Number.isInteger(meta.epoch) ||
+      if (!(meta.recordingName || payload.recordingName) || !(meta.datasetName || payload.datasetName) || !Number.isInteger(meta.epoch) ||
           !Number.isFinite(meta.windowStart) || !(meta.windowDuration > 0) ||
           !Number.isFinite(meta.windowDuration)) throw new Error("manifest 图片时间信息无效。");
     }
+    if (Array.isArray(payload.channels) && payload.channels.length) {
+      const channels = payload.channels.map((item, index) => typeof item === "string" ? {
+        name: item, topPct: 5 + index * 90 / payload.channels.length,
+        bottomPct: 5 + (index + 1) * 90 / payload.channels.length
+      } : { name: item.name, kind: item.kind, topPct: Number(item.topPct), bottomPct: Number(item.bottomPct) });
+      state.layoutPreset = { calibrated: channels.every(c => c.bottomPct > c.topPct),
+        plotLeftPct: Number(payload.canvas?.plotLeftPct ?? 6.5),
+        plotRightPct: Number(payload.canvas?.plotRightPct ?? 99), channels };
+      state.manifestLayout = cloneLayout(state.layoutPreset);
+    }
     for (const { meta, image } of bindings) {
-      Object.assign(image, { recordingName: meta.recordingName, datasetName: meta.datasetName,
+      Object.assign(image, { recordingName: meta.recordingName || payload.recordingName,
+        datasetName: meta.datasetName || payload.datasetName,
         epoch: meta.epoch, epochBase: payload.epochBase, epochLengthSec: payload.epochLengthSec,
         windowStart: meta.windowStart, windowDuration: meta.windowDuration });
+      image.layout = cloneLayout(state.layoutPreset);
     }
     persistNow("图片窗口信息已加载；请设置通道并校准。");
     render();
@@ -1727,15 +1705,24 @@
       const geometry = images[0];
       const length = geometry.epochLengthSec || geometry.windowDuration;
       const base = geometry.epochBase ?? (getEpochIndexNumber(geometry) - geometry.windowStart / length);
+      if (event.datasetName !== geometry.datasetName) {
+        throw new Error(`事件 ${event.eventId} 的 dataset_name (${event.datasetName}) 与底图 (${geometry.datasetName}) 不一致。`);
+      }
+      if (event.startEpoch < base || event.endEpoch < base || event.startOffset >= length || event.endOffset >= length) {
+        throw new Error(`事件 ${event.eventId} 的 epoch/offset 超出底图约定；offset 必须满足 0 <= offset < ${length}。`);
+      }
       const startTime = (event.startEpoch - base) * length + event.startOffset;
       const endTime = (event.endEpoch - base) * length + event.endOffset;
+      if (!(endTime > startTime) || Math.abs((endTime - startTime) - event.durationS) > 0.001) {
+        throw new Error(`事件 ${event.eventId} 的 duration_s 与 epoch/offset 时间区间不一致。`);
+      }
       const visible = images.some(image => endTime > image.windowStart && startTime < image.windowStart + image.windowDuration);
       if (visible) pending.push({ ...event, startTime, endTime });
       if (!visible) outside++;
     }
     if (unmatched) {
       const loadedExamples = state.images.slice(0, 3).map(image => image.name).join(", ") || "当前没有已加载图片";
-      throw new Error(`${unmatched} 个事件没有匹配的 recording。CSV image_name 示例：${unmatchedExamples.join(", ")}。当前底图示例：${loadedExamples}。请先生成并加载对应底图版本，同时确认 CSV 的 image_name 与 manifest 中的 recordingName 一致。`);
+      throw new Error(`${unmatched} 个事件没有匹配的 recording。CSV image_name 示例：${unmatchedExamples.join(", ")}。当前底图示例：${loadedExamples}。请先加载对应外部底图，同时确认 CSV 的 image_name 与 manifest 中的 recordingName 一致。`);
     }
     let added = 0;
     const missing = new Set();
@@ -1757,6 +1744,12 @@
       }
       const layout = state.images.find(image => image.recordingName === event.recordingName)?.layout;
       for (const channel of event.channels) {
+        if (channel === "GLOBAL") continue;
+        if (channel === "LOC;ROC") {
+          const available = new Set((layout?.channels || []).map(c => EventGeometry.channel(c.name)));
+          if (!available.has("LOC") || !available.has("ROC")) missing.add(channel);
+          continue;
+        }
         if (!layout?.channels.some(c => EventGeometry.channel(c.name) === channel)) missing.add(channel);
       }
     }
