@@ -49,8 +49,8 @@
         if (!get(c) || !Number.isFinite(Number(get(c)))) throw new Error(`非法时间字段：${c}`);
         return Number(get(c));
       });
-      if (!Number.isInteger(times[0]) || !Number.isInteger(times[2]) || times[1] < 0 || times[3] < 0)
-        throw new Error("epoch 必须是整数，offset 必须非负。");
+      if (!Number.isInteger(times[0]) || !Number.isInteger(times[2]))
+        throw new Error("epoch 必须是整数。");
       const eventType = type(get("type"));
       if (!get("dataset_name") || !get("image_name"))
         throw new Error("dataset_name 和 image_name 不能为空。");
@@ -68,8 +68,10 @@
       const definition = eventDefinitions[eventType];
       for (const c of detected) {
         if (!definition.allowed.includes(c)) throw new Error(`${definition.csvType} 不允许通道 ${c}。`);
+        const start = epochPosition(startSec, epochLengthSec);
+        const end = epochPosition(endSec, epochLengthSec);
         parsed.push({ eventType, datasetName: get("dataset_name"), recordingName: get("image_name"),
-          startEpoch: times[0], startOffset: times[1], endEpoch: times[2], endOffset: times[3],
+          startEpoch: start.epoch, startOffset: start.offset, endEpoch: end.epoch, endOffset: end.offset,
           startSec, endSec, durationS: Number(get("duration_s")),
           channel: c, suppliedId: get("annotation_id") });
       }
@@ -90,19 +92,23 @@
           if (!sameScope) throw new Error(`annotation_id ${item.suppliedId} 对应了不同的事件类型或记录。`);
           const priorInterval = existing.channelIntervals.find(interval => interval.channel === item.channel);
           if (priorInterval) {
-            if (priorInterval.startEpoch !== item.startEpoch || priorInterval.startOffset !== item.startOffset ||
-                priorInterval.endEpoch !== item.endEpoch || priorInterval.endOffset !== item.endOffset)
-              throw new Error(`annotation_id ${item.suppliedId} 在通道 ${item.channel} 上对应了多个时间区间。`);
+            const priorStart = priorInterval.startEpoch * epochLengthSec + priorInterval.startOffset;
+            const priorEnd = priorInterval.endEpoch * epochLengthSec + priorInterval.endOffset;
+            if (item.startSec > priorEnd + 0.001 || priorStart > item.endSec + 0.001)
+              throw new Error(`annotation_id ${item.suppliedId} 在通道 ${item.channel} 上包含不连续的时间片段。`);
+            const mergedStart = Math.min(priorStart, item.startSec);
+            const mergedEnd = Math.max(priorEnd, item.endSec);
+            Object.assign(priorInterval, intervalFromSeconds(item.channel, mergedStart, mergedEnd, epochLengthSec));
           } else {
             existing.channels.push(item.channel);
             existing.channelIntervals.push(intervalFromItem(item));
-            existing.startSec = Math.min(existing.startSec, item.startSec);
-            existing.endSec = Math.max(existing.endSec, item.endSec);
-            const envelope = eventFromInterval(existing, existing.startSec, existing.endSec,
-              existing.channels, existing.eventId, epochLengthSec, existing.channelIntervals);
-            Object.assign(existing, envelope, { identity: existing.identity,
-              startSec: existing.startSec, endSec: existing.endSec });
           }
+          existing.startSec = Math.min(existing.startSec, item.startSec);
+          existing.endSec = Math.max(existing.endSec, item.endSec);
+          const envelope = eventFromInterval(existing, existing.startSec, existing.endSec,
+            existing.channels, existing.eventId, epochLengthSec, existing.channelIntervals);
+          Object.assign(existing, envelope, { identity: existing.identity,
+            startSec: existing.startSec, endSec: existing.endSec });
         } else {
           const event = eventFromInterval(item, item.startSec, item.endSec, [item.channel], item.suppliedId,
             epochLengthSec, [item]);
@@ -158,6 +164,16 @@
   function intervalFromItem(item) {
     return { channel: item.channel, startEpoch: item.startEpoch, startOffset: item.startOffset,
       endEpoch: item.endEpoch, endOffset: item.endOffset, durationS: item.durationS };
+  }
+  function epochPosition(seconds, epochLengthSec) {
+    const epoch = Math.floor(seconds / epochLengthSec + 1e-12);
+    return { epoch, offset: seconds - epoch * epochLengthSec };
+  }
+  function intervalFromSeconds(channelName, startSec, endSec, epochLengthSec) {
+    const start = epochPosition(startSec, epochLengthSec);
+    const end = epochPosition(endSec, epochLengthSec);
+    return { channel: channelName, startEpoch: start.epoch, startOffset: start.offset,
+      endEpoch: end.epoch, endOffset: end.offset, durationS: endSec - startSec };
   }
   function eventFromInterval(source, startSec, endSec, channels, eventId, epochLengthSec, members = []) {
     const startEpoch = Math.floor(startSec / epochLengthSec + 1e-12);

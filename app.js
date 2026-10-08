@@ -1640,21 +1640,33 @@
       const image = state.images.find(item => item.recordingName === event.recordingName &&
         item.datasetName === event.datasetName);
       if (!image) throw new Error(`事件 ${event.id} 找不到对应 recording：${event.recordingName}`);
-      return eventChannelIntervals(event).map(interval => {
-        const start = getEpochPositionForTime(image, interval.startTime);
-        const end = getEpochPositionForTime(image, interval.endTime);
-        return {
-          type: CSV_EVENT_TYPES[event.eventType] || event.eventType,
-          start_epoch: start.epoch,
-          start_offset: start.offset,
-          end_epoch: end.epoch,
-          end_offset: end.offset,
-          channel: interval.channel,
-          dataset_name: event.datasetName,
-          image_name: event.recordingName,
-          duration_s: interval.endTime - interval.startTime,
-          annotation_id: event.id
-        };
+      const epochLength = Number(image.epochLengthSec || image.windowDuration || state.defaultWindowDuration || 30);
+      return eventChannelIntervals(event).flatMap(interval => {
+        const fragments = [];
+        let fragmentStart = interval.startTime;
+        while (fragmentStart < interval.endTime - 1e-9) {
+          const start = getEpochPositionForTime(image, fragmentStart);
+          const epochEnd = fragmentStart + (epochLength - start.offset);
+          const fragmentEnd = Math.min(interval.endTime, epochEnd);
+          const reachesBoundary = Math.abs(fragmentEnd - epochEnd) < 1e-9;
+          const end = reachesBoundary
+            ? { epoch: start.epoch, offset: epochLength }
+            : getEpochPositionForTime(image, fragmentEnd);
+          fragments.push({
+            type: CSV_EVENT_TYPES[event.eventType] || event.eventType,
+            start_epoch: start.epoch,
+            start_offset: start.offset,
+            end_epoch: end.epoch,
+            end_offset: end.offset,
+            channel: interval.channel,
+            dataset_name: event.datasetName,
+            image_name: event.recordingName,
+            duration_s: fragmentEnd - fragmentStart,
+            annotation_id: event.id
+          });
+          fragmentStart = fragmentEnd;
+        }
+        return fragments;
       });
     });
     const columns = [
@@ -1754,10 +1766,10 @@
         throw new Error(`事件 ${event.eventId} 的 dataset_name (${event.datasetName}) 与底图 (${geometry.datasetName}) 不一致。`);
       }
       const channelIntervals = event.channelIntervals.map(interval => {
-        if (interval.startEpoch < base || interval.endEpoch < base ||
-            interval.startOffset >= length || interval.endOffset >= length) {
-          throw new Error(`事件 ${event.eventId} 的 epoch/offset 超出底图约定；offset 必须满足 0 <= offset < ${length}。`);
-        }
+        const normalizedStart = interval.startEpoch * length + interval.startOffset;
+        const normalizedEnd = interval.endEpoch * length + interval.endOffset;
+        if (normalizedStart < base * length || normalizedEnd < base * length)
+          throw new Error(`事件 ${event.eventId} 的时间早于底图 epochBase ${base}。`);
         const startTime = (interval.startEpoch - base) * length + interval.startOffset;
         const endTime = (interval.endEpoch - base) * length + interval.endOffset;
         if (!(endTime > startTime) || Math.abs((endTime - startTime) - interval.durationS) > 0.001) {

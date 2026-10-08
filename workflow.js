@@ -91,7 +91,7 @@
       project_dir: byId("wfProject").value.trim(),
       annotations_dir: byId("wfAnnotations").value.trim(),
     });
-    await reloadApplication("项目已创建。正在加载外部图片集...");
+    await reloadApplication("项目已创建。正在加载当前底图...");
   }));
 
   byId("wfOpen").addEventListener("click", () => run(async () => {

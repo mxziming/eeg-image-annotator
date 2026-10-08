@@ -96,6 +96,25 @@ button:disabled {
   justify-content: flex-end;
 }
 
+.topbar-event-selector {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.topbar-event-selector select {
+  min-width: 118px;
+  height: 30px;
+  padding: 3px 28px 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+}
+
 .menu {
   position: relative;
 }
@@ -301,14 +320,13 @@ button:disabled {
 
 .review-workspace {
   display: grid;
-  grid-template-columns: clamp(190px, 12vw, 224px) minmax(0, 1fr) clamp(178px, 11.5vw, 214px);
+  grid-template-columns: clamp(190px, 12vw, 224px) minmax(0, 1fr);
   gap: 10px;
   min-width: 0;
 }
 
 .epoch-rail,
-.viewer-panel,
-.inspector-sidebar {
+.viewer-panel {
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -319,62 +337,6 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--surface);
-}
-
-.inspector-sidebar {
-  min-height: 540px;
-  overflow-x: hidden;
-  overflow-y: auto;
-}
-
-.inspector-section {
-  display: grid;
-  gap: 10px;
-  padding: 13px 12px;
-}
-
-.inspector-section + .inspector-section {
-  border-top: 1px solid var(--border);
-}
-
-.inspector-section h2 {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.inspector-section .field {
-  gap: 4px;
-}
-
-.inspector-section .field input,
-.inspector-section .field select {
-  min-height: 32px;
-}
-
-.annotation-settings {
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-areas:
-    "heading"
-    "event"
-    "start"
-    "duration";
-}
-
-.annotation-settings h2 {
-  grid-area: heading;
-}
-
-.annotation-settings .field:nth-of-type(1) {
-  grid-area: event;
-}
-
-.annotation-settings .field:nth-of-type(2) {
-  grid-area: start;
-}
-
-.annotation-settings .field:nth-of-type(3) {
-  grid-area: duration;
 }
 
 .rail-heading {
@@ -824,7 +786,7 @@ button:disabled {
 
 .lower-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr) minmax(280px, 1fr);
   gap: 0;
   align-items: start;
   min-width: 0;
@@ -895,17 +857,25 @@ button:disabled {
   width: 100%;
 }
 
-.calibration-panel summary {
-  margin-bottom: 13px;
-  font-size: 14px;
-  font-weight: 650;
-  cursor: pointer;
-}
-
 .calibration-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+
+.project-settings-panel {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.project-settings-panel .field {
+  gap: 4px;
+  margin: 0;
+}
+
+.project-settings-panel input {
+  width: 100%;
 }
 
 .calibration-grid .button {
@@ -1107,23 +1077,8 @@ button:disabled {
     height: calc(100vh - 58px);
   }
 
-  .inspector-sidebar {
-    grid-column: 1 / -1;
-    display: grid;
-    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
-    min-height: 0;
-    height: auto;
-    max-height: none;
-    overflow: visible;
-  }
-
-  .inspector-section + .inspector-section {
-    border-top: 0;
-    border-left: 1px solid var(--border);
-  }
-
   .lower-workspace {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     row-gap: 24px;
   }
 
@@ -1147,6 +1102,14 @@ button:disabled {
     justify-content: flex-end;
   }
 
+  .topbar-event-selector span {
+    display: none;
+  }
+
+  .topbar-event-selector select {
+    min-width: 106px;
+  }
+
   .workspace {
     padding: 9px 8px 24px;
   }
@@ -1164,16 +1127,6 @@ button:disabled {
   .viewer-panel {
     height: clamp(400px, 52vh, 520px);
     min-height: 0;
-  }
-
-  .inspector-sidebar {
-    grid-column: 1;
-    grid-template-columns: 1fr;
-  }
-
-  .inspector-section + .inspector-section {
-    border-top: 1px solid var(--border);
-    border-left: 0;
   }
 
   .lower-workspace {
@@ -1196,10 +1149,6 @@ button:disabled {
   .stage-heading {
     grid-template-columns: 34px minmax(0, 1fr) 34px;
   }
-}
-
-.inspector-section + .dataset-panel {
-  border-top: 0;
 }
 
 @media (max-width: 460px) {
