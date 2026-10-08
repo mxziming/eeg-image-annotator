@@ -573,14 +573,38 @@
   }
 
   function eventIdentity(event) {
+    const intervals = eventChannelIntervals(event).map(interval => [
+      interval.channel, round(Number(interval.startTime), 6), round(Number(interval.endTime), 6)
+    ]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
     return JSON.stringify([
       normalizeEventType(event.eventType),
       event.datasetName || "",
       event.recordingName || "",
-      round(Number(event.startTime), 6),
-      round(Number(event.endTime), 6),
-      [...event.channels].map(EventGeometry.channel).sort()
+      intervals
     ]);
+  }
+
+  function eventChannelIntervals(event) {
+    if (Array.isArray(event.channelIntervals) && event.channelIntervals.length) {
+      return event.channelIntervals.map(interval => ({
+        channel: EventGeometry.channel(interval.channel),
+        startTime: Number(interval.startTime),
+        endTime: Number(interval.endTime)
+      }));
+    }
+    return (event.channels || []).map(channel => ({ channel: EventGeometry.channel(channel),
+      startTime: Number(event.startTime), endTime: Number(event.endTime) }));
+  }
+
+  function syncEventEnvelope(event) {
+    const intervals = eventChannelIntervals(event).filter(interval => interval.endTime > interval.startTime);
+    event.channelIntervals = intervals;
+    event.channels = [...new Set(intervals.map(interval => interval.channel))];
+    if (intervals.length) {
+      event.startTime = Math.min(...intervals.map(interval => interval.startTime));
+      event.endTime = Math.max(...intervals.map(interval => interval.endTime));
+    }
+    return event;
   }
 
   function migrateLegacyEvents(images) {
@@ -608,11 +632,15 @@
         event.startTime = Math.min(event.startTime, range.start);
         event.endTime = Math.max(event.endTime, range.end);
         if (annotation.channel && !event.channels.includes(EventGeometry.channel(annotation.channel))) {
-          event.channels.push(EventGeometry.channel(annotation.channel));
+          const channel = EventGeometry.channel(annotation.channel);
+          event.channels.push(channel);
+          event.channelIntervals = event.channelIntervals || [];
+          event.channelIntervals.push({ channel, startTime: range.start, endTime: range.end });
         }
       }
     }
-    return [...groups.values()].filter(event => event.endTime > event.startTime && event.channels.length);
+    return [...groups.values()].map(syncEventEnvelope)
+      .filter(event => event.endTime > event.startTime && event.channels.length);
   }
 
   function getAnnotationsForActiveEvent(image) {
@@ -621,22 +649,20 @@
     const windowEnd = windowStart + Number(image.windowDuration || state.defaultWindowDuration);
     return state.events.flatMap((event) => {
       if (normalizeEventType(event.eventType) !== state.activeEventType ||
-          event.recordingName !== image.recordingName || event.datasetName !== image.datasetName ||
-          !(event.endTime > windowStart && event.startTime < windowEnd)) return [];
-      const left = Math.max(event.startTime, windowStart);
-      const right = Math.min(event.endTime, windowEnd);
-      return event.channels.map((channel) => ({
-        id: JSON.stringify([event.id, image.id, channel]),
+          event.recordingName !== image.recordingName || event.datasetName !== image.datasetName) return [];
+      return eventChannelIntervals(event).filter(interval =>
+        interval.endTime > windowStart && interval.startTime < windowEnd).map((interval) => ({
+        id: JSON.stringify([event.id, image.id, interval.channel]),
         eventId: event.id,
         eventType: event.eventType,
-        channel,
+        channel: interval.channel,
         source: event.source,
         datasetName: event.datasetName,
         recordingName: event.recordingName,
-        startFraction: (left - windowStart) / image.windowDuration,
-        endFraction: (right - windowStart) / image.windowDuration,
-        originalStart: event.startTime,
-        originalEnd: event.endTime
+        startFraction: (Math.max(interval.startTime, windowStart) - windowStart) / image.windowDuration,
+        endFraction: (Math.min(interval.endTime, windowEnd) - windowStart) / image.windowDuration,
+        originalStart: interval.startTime,
+        originalEnd: interval.endTime
       }));
     });
   }
@@ -1159,6 +1185,9 @@
       startTime: time.start,
       endTime: time.end,
       channels: [...new Set(rows.map(row => row.channel))],
+      channelIntervals: [...new Set(rows.map(row => row.channel))].map(channel => ({
+        channel, startTime: time.start, endTime: time.end
+      })),
       source: "manual",
       createdAt: new Date().toISOString()
     };
@@ -1183,7 +1212,9 @@
       annotationId: annotation.id,
       startPoint: point,
       originalBox: annotationBox(getCurrentImage(), annotation),
-      originalEvent: { ...getEventForAnnotation(annotation), channels: [...getEventForAnnotation(annotation).channels] }
+      originalEvent: { ...getEventForAnnotation(annotation),
+        channels: [...getEventForAnnotation(annotation).channels],
+        channelIntervals: eventChannelIntervals(getEventForAnnotation(annotation)).map(interval => ({ ...interval })) }
     };
     els.overlay.setPointerCapture(event.pointerId);
     renderAnnotationsOnly();
@@ -1248,27 +1279,35 @@
       const visibleStart = image.windowStart + clamp((box.x1 - plot.left) / span, 0, 1) * image.windowDuration;
       const visibleEnd = image.windowStart + clamp((box.x2 - plot.left) / span, 0, 1) * image.windowDuration;
       const original = state.drag?.originalEvent || event;
+      const interval = eventChannelIntervals(event).find(item => item.channel === annotation.channel);
+      const originalInterval = eventChannelIntervals(original).find(item => item.channel === annotation.channel);
+      if (!interval || !originalInterval) return;
       if (state.drag?.mode === "move") {
-        const originalVisibleStart = Math.max(original.startTime, image.windowStart);
+        const originalVisibleStart = Math.max(originalInterval.startTime, image.windowStart);
         const delta = visibleStart - originalVisibleStart;
-        event.startTime = original.startTime + delta;
-        event.endTime = original.endTime + delta;
+        interval.startTime = originalInterval.startTime + delta;
+        interval.endTime = originalInterval.endTime + delta;
       } else {
-        if (original.startTime >= image.windowStart) event.startTime = visibleStart;
-        if (original.endTime <= image.windowStart + image.windowDuration) event.endTime = visibleEnd;
+        if (originalInterval.startTime >= image.windowStart) interval.startTime = visibleStart;
+        if (originalInterval.endTime <= image.windowStart + image.windowDuration) interval.endTime = visibleEnd;
       }
+      event.channelIntervals = eventChannelIntervals(event).map(item =>
+        item.channel === annotation.channel ? interval : item);
       const definition = EventGeometry.eventDefinitions[event.eventType];
       const best = getChannelRegions(image).map(c => ({
         c, overlap: Math.max(0, Math.min(c.bottom, box.y2) - Math.max(c.top, box.y1))
       })).sort((a, b) => b.overlap - a.overlap)[0];
       if (definition?.channelMode === "overlap" && best?.overlap > 0) {
         const nextChannel = EventGeometry.channel(best.c.name);
-        const index = event.channels.indexOf(annotation.channel);
-        if (index >= 0 && nextChannel !== annotation.channel) {
-          if (event.channels.includes(nextChannel)) event.channels.splice(index, 1);
-          else event.channels[index] = nextChannel;
+        if (nextChannel !== annotation.channel) {
+          if (event.channelIntervals.some(item => item.channel === nextChannel)) {
+            event.channelIntervals = event.channelIntervals.filter(item => item !== interval);
+          } else {
+            interval.channel = nextChannel;
+          }
         }
       }
+      syncEventEnvelope(event);
       event.updatedAt = new Date().toISOString();
       return;
     }
@@ -1318,7 +1357,9 @@
     const annotation = getSelectedAnnotation();
     const event = getEventForAnnotation(annotation);
     if (event && annotation) {
-      event.channels = event.channels.filter((channel) => channel !== annotation.channel);
+      event.channelIntervals = eventChannelIntervals(event)
+        .filter(interval => interval.channel !== annotation.channel);
+      syncEventEnvelope(event);
       if (!event.channels.length) state.events = state.events.filter((item) => item.id !== event.id);
     }
     state.selectedAnnotationId = null;
@@ -1599,20 +1640,22 @@
       const image = state.images.find(item => item.recordingName === event.recordingName &&
         item.datasetName === event.datasetName);
       if (!image) throw new Error(`事件 ${event.id} 找不到对应 recording：${event.recordingName}`);
-      const start = getEpochPositionForTime(image, event.startTime);
-      const end = getEpochPositionForTime(image, event.endTime);
-      return event.channels.map(channel => ({
-        type: CSV_EVENT_TYPES[event.eventType] || event.eventType,
-        start_epoch: start.epoch,
-        start_offset: start.offset,
-        end_epoch: end.epoch,
-        end_offset: end.offset,
-        channel,
-        dataset_name: event.datasetName,
-        image_name: event.recordingName,
-        duration_s: event.endTime - event.startTime,
-        annotation_id: event.id
-      }));
+      return eventChannelIntervals(event).map(interval => {
+        const start = getEpochPositionForTime(image, interval.startTime);
+        const end = getEpochPositionForTime(image, interval.endTime);
+        return {
+          type: CSV_EVENT_TYPES[event.eventType] || event.eventType,
+          start_epoch: start.epoch,
+          start_offset: start.offset,
+          end_epoch: end.epoch,
+          end_offset: end.offset,
+          channel: interval.channel,
+          dataset_name: event.datasetName,
+          image_name: event.recordingName,
+          duration_s: interval.endTime - interval.startTime,
+          annotation_id: event.id
+        };
+      });
     });
     const columns = [
       "type",
@@ -1685,7 +1728,9 @@
   async function importCsv(file) {
     const rows = parseCsv(await file.text());
     if (rows.length < 2) throw new Error("CSV 中没有可导入的数据行。");
-    const events = EventGeometry.readRows(rows);
+    const epochLengthSec = state.images[0]?.epochLengthSec || state.images[0]?.windowDuration ||
+      state.defaultWindowDuration;
+    const events = EventGeometry.readRows(rows, { epochLengthSec });
     const pending = [];
     let unmatched = 0;
     let outside = 0;
@@ -1708,16 +1753,23 @@
       if (event.datasetName !== geometry.datasetName) {
         throw new Error(`事件 ${event.eventId} 的 dataset_name (${event.datasetName}) 与底图 (${geometry.datasetName}) 不一致。`);
       }
-      if (event.startEpoch < base || event.endEpoch < base || event.startOffset >= length || event.endOffset >= length) {
-        throw new Error(`事件 ${event.eventId} 的 epoch/offset 超出底图约定；offset 必须满足 0 <= offset < ${length}。`);
-      }
-      const startTime = (event.startEpoch - base) * length + event.startOffset;
-      const endTime = (event.endEpoch - base) * length + event.endOffset;
-      if (!(endTime > startTime) || Math.abs((endTime - startTime) - event.durationS) > 0.001) {
-        throw new Error(`事件 ${event.eventId} 的 duration_s 与 epoch/offset 时间区间不一致。`);
-      }
-      const visible = images.some(image => endTime > image.windowStart && startTime < image.windowStart + image.windowDuration);
-      if (visible) pending.push({ ...event, startTime, endTime });
+      const channelIntervals = event.channelIntervals.map(interval => {
+        if (interval.startEpoch < base || interval.endEpoch < base ||
+            interval.startOffset >= length || interval.endOffset >= length) {
+          throw new Error(`事件 ${event.eventId} 的 epoch/offset 超出底图约定；offset 必须满足 0 <= offset < ${length}。`);
+        }
+        const startTime = (interval.startEpoch - base) * length + interval.startOffset;
+        const endTime = (interval.endEpoch - base) * length + interval.endOffset;
+        if (!(endTime > startTime) || Math.abs((endTime - startTime) - interval.durationS) > 0.001) {
+          throw new Error(`事件 ${event.eventId} 在通道 ${interval.channel} 的 duration_s 与 epoch/offset 时间区间不一致。`);
+        }
+        return { channel: interval.channel, startTime, endTime };
+      });
+      const startTime = Math.min(...channelIntervals.map(interval => interval.startTime));
+      const endTime = Math.max(...channelIntervals.map(interval => interval.endTime));
+      const visible = channelIntervals.some(interval => images.some(image =>
+        interval.endTime > image.windowStart && interval.startTime < image.windowStart + image.windowDuration));
+      if (visible) pending.push({ ...event, startTime, endTime, channelIntervals });
       if (!visible) outside++;
     }
     if (unmatched) {
@@ -1729,7 +1781,7 @@
     for (const event of pending) {
       const key = eventIdentity(event);
       if (!state.events.some(item => eventIdentity(item) === key)) {
-        state.events.push({
+        state.events.push(syncEventEnvelope({
           id: event.eventId,
           eventType: event.eventType,
           datasetName: event.datasetName,
@@ -1737,9 +1789,10 @@
           startTime: event.startTime,
           endTime: event.endTime,
           channels: [...event.channels],
+          channelIntervals: event.channelIntervals.map(interval => ({ ...interval })),
           source: "reference",
           createdAt: new Date().toISOString()
-        });
+        }));
         added++;
       }
       const layout = state.images.find(image => image.recordingName === event.recordingName)?.layout;
@@ -1775,7 +1828,8 @@
       activeEventType: state.activeEventType,
       layoutPreset: cloneLayout(state.layoutPreset),
       defaultWindowDuration: state.defaultWindowDuration,
-      events: state.events.map((event) => ({ ...event, channels: [...event.channels] })),
+      events: state.events.map((event) => ({ ...event, channels: [...event.channels],
+        channelIntervals: eventChannelIntervals(event).map(interval => ({ ...interval })) })),
       images: state.images.map((image) => ({
           ...image,
           naturalWidth: image.naturalWidth || null,
@@ -1831,7 +1885,8 @@
         state.defaultWindowDuration
       );
       state.events = Array.isArray(payload.events)
-        ? payload.events.map(event => ({ ...event, channels: [...event.channels] }))
+        ? payload.events.map(event => syncEventEnvelope({ ...event, channels: [...(event.channels || [])],
+            channelIntervals: eventChannelIntervals(event).map(interval => ({ ...interval })) }))
         : migrateLegacyEvents(payload.images || []);
       state.images = Array.isArray(payload.images)
         ? payload.images.map((image) => ({
